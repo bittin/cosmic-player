@@ -1,8 +1,11 @@
+album = Album: {$album}
 audio = Hang
 no-video-or-audio-file-open = Nincs videó- vagy hangfájl megnyitva
 open-file = Fájl megnyitása
 open-folder = Mappa megnyitása
 subtitles = Feliratok
+unknown-author = Ismeretlen szerző
+untitled = Nincs cím
 
 # Context Pages
 
@@ -12,7 +15,7 @@ settings = Beállítások
 ### Appearance
 appearance = Megjelenés
 theme = Téma
-match-desktop = Asztallal egyező
+match-desktop = Rendszertéma
 dark = Sötét
 light = Világos
 
@@ -20,10 +23,10 @@ light = Világos
 
 ## File
 file = Fájl
-open-media = Média megnyitása...
-open-recent-media = Legutóbbi média megnyitása
+open-media = Médiafájl megnyitása...
+open-recent-media = Legutóbbi médiafájl megnyitása
 close-file = Fájl bezárása
-open-media-folder = Média mappa megnyitása...
-open-recent-media-folder = Legutóbbi média mappa megnyitása
-close-media-folder = Média mappa bezárása
+open-media-folder = Médiamappa megnyitása...
+open-recent-media-folder = Legutóbbi médiamappa megnyitása
+close-media-folder = Médiamappa bezárása
 quit = Kilépés

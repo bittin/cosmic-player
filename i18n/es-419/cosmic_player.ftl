@@ -15,7 +15,7 @@ settings = Configuración
 ### Appearance
 appearance = Apariencia
 theme = Tema
-match-desktop = Seguir el estilo del escritorio
+match-desktop = Coincidir con el escritorio
 dark = Oscuro
 light = Claro
 
@@ -23,10 +23,10 @@ light = Claro
 
 ## File
 file = Archivo
-open-media = Abrir archivo multimedia...
-open-recent-media = Abrir archivos multimedia recientes
+open-media = Abrir medio...
+open-recent-media = Abrir medio reciente
 close-file = Cerrar archivo
-open-media-folder = Abrir carpeta multimedia...
-open-recent-media-folder = Abrir carpetas multimedia recientes
-close-media-folder = Cerrar carpeta multimedia
+open-media-folder = Abrir carpeta de medios...
+open-recent-media-folder = Abrir carpeta de medios reciente
+close-media-folder = Cerrar carpeta de medios
 quit = Salir

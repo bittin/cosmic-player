@@ -2,13 +2,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use cosmic::{
-    app::{message, Command, Core, Settings},
+    app::{command, message, Command, Core, Settings},
     cosmic_config::{self, CosmicConfigEntry},
     cosmic_theme, executor, font,
     iced::{
         event::{self, Event},
         keyboard::{Event as KeyEvent, Key, Modifiers},
-        mouse::Event as MouseEvent,
+        mouse::{Event as MouseEvent, ScrollDelta},
         subscription::Subscription,
         window, Alignment, Background, Border, Color, ContentFit, Length, Limits,
     },
@@ -37,6 +37,7 @@ use crate::{
     project::ProjectNode,
 };
 
+mod argparse;
 mod config;
 mod key_bind;
 mod localize;
@@ -44,12 +45,15 @@ mod menu;
 #[cfg(feature = "mpris-server")]
 mod mpris;
 mod project;
+mod thumbnail;
 
 static CONTROLS_TIMEOUT: Duration = Duration::new(2, 0);
 
 const GST_PLAY_FLAG_VIDEO: i32 = 1 << 0;
 const GST_PLAY_FLAG_AUDIO: i32 = 1 << 1;
 const GST_PLAY_FLAG_TEXT: i32 = 1 << 2;
+
+use std::error::Error;
 
 fn language_name(code: &str) -> Option<String> {
     let code_c = CString::new(code).ok()?;
@@ -67,8 +71,35 @@ fn language_name(code: &str) -> Option<String> {
 
 /// Runs application with these settings
 #[rustfmt::skip]
-pub fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+
+    let args = argparse::parse();
+
+    if let Some(output) = args.thumbnail_opt {
+        let Some(input) = args.url_opt else {
+            log::error!("thumbnailer can only handle exactly one URL");
+            process::exit(1);
+        };
+
+        match thumbnail::main(&input, &output, args.size_opt) {
+            Ok(()) => process::exit(0),
+            Err(err) => {
+                log::error!("failed to thumbnail '{}': {}", input, err);
+                process::exit(1);
+            }
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "redox")))]
+    match fork::daemon(true, true) {
+        Ok(fork::Fork::Child) => (),
+        Ok(fork::Fork::Parent(_child_pid)) => process::exit(0),
+        Err(err) => {
+            eprintln!("failed to daemonize: {:?}", err);
+            process::exit(1);
+        }
+    }
 
     localize::localize();
 
@@ -77,7 +108,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = match Config::get_entry(&config_handler) {
                 Ok(ok) => ok,
                 Err((errs, config)) => {
-                    log::info!("errors loading config: {:?}", errs);
+                    log::error!("errors loading config: {:?}", errs);
                     config
                 }
             };
@@ -110,32 +141,13 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings = settings.theme(config.app_theme.theme());
     settings = settings.size_limits(Limits::NONE.min_width(360.0).min_height(180.0));
 
-    let url_opt = match std::env::args().nth(1) {
-        Some(arg) => match url::Url::parse(&arg) {
-            Ok(url) => Some(url),
-            Err(_) => match fs::canonicalize(&arg) {
-                Ok(path) => match url::Url::from_file_path(&path) {
-                    Ok(url) => Some(url),
-                    Err(()) => {
-                        log::warn!("failed to parse path {:?}", path);
-                        None
-                    }
-                },
-                Err(err) => {
-                    log::warn!("failed to parse argument {:?}: {}", arg, err);
-                    None
-                }
-            },
-        },
-        None => None,
-    };
-
     let flags = Flags {
         config_handler,
         config,
         config_state_handler,
         config_state,
-        url_opt,
+        url_opt: args.url_opt,
+        urls: args.urls,
     };
     cosmic::app::run::<App>(settings, flags)?;
 
@@ -184,6 +196,7 @@ pub struct Flags {
     config_state_handler: Option<cosmic_config::Config>,
     config_state: ConfigState,
     url_opt: Option<url::Url>,
+    urls: Option<Vec<url::Url>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,6 +240,7 @@ pub enum Message {
     Config(Config),
     ConfigState(ConfigState),
     DropdownToggle(DropdownKind),
+    DurationChanged(Duration),
     FileClose,
     FileLoad(url::Url),
     FileOpen,
@@ -235,6 +249,7 @@ pub enum Message {
     FolderLoad(PathBuf),
     FolderOpen,
     FolderOpenRecent(usize),
+    MultipleLoad(Vec<url::Url>),
     Fullscreen,
     Key(Modifiers, Key),
     AudioCode(usize),
@@ -244,6 +259,7 @@ pub enum Message {
     Pause,
     Play,
     PlayPause,
+    Scrolled(ScrollDelta),
     Seek(f64),
     SeekRelative(f64),
     SeekRelease,
@@ -275,6 +291,7 @@ pub struct App {
     position: f64,
     duration: f64,
     dragging: bool,
+    paused_on_scrub: bool,
     audio_codes: Vec<String>,
     audio_tags: Vec<gst::TagList>,
     current_audio: i32,
@@ -334,7 +351,7 @@ impl App {
             gst::init().unwrap();
 
             let pipeline = format!(
-                "playbin uri=\"{}\" video-sink=\"videoscale ! videoconvert ! appsink name=iced_video drop=true caps=video/x-raw,format=NV12,pixel-aspect-ratio=1/1\"",
+                "playbin uri=\"{}\" video-sink=\"videoscale ! videoconvert ! videoflip method=automatic ! appsink name=iced_video drop=true caps=video/x-raw,format=NV12,pixel-aspect-ratio=1/1\"",
                 url.as_str()
             );
             let pipeline = gst::parse::launch(pipeline.as_ref())
@@ -342,7 +359,17 @@ impl App {
                 .downcast::<gst::Pipeline>()
                 .map_err(|_| iced_video_player::Error::Cast)
                 .unwrap();
-
+            pipeline.connect("element-setup", false, |vals| {
+                let Ok(elem) = vals[1].get::<gst::Element>() else {
+                    return None;
+                };
+                if let Some(factory) = elem.factory() {
+                    if factory.name() == "souphttpsrc" {
+                        elem.set_property("user-agent", "Mozilla/5.0 (X11; Linux x86_64; rv:142.0) Gecko/20100101 Firefox/142.0");
+                    }
+                }
+                None
+            });
             let video_sink: gst::Element = pipeline.property("video-sink");
             let pad = video_sink.pads().first().cloned().unwrap();
             let pad = pad.dynamic_cast::<gst::GhostPad>().unwrap();
@@ -358,8 +385,29 @@ impl App {
                 Ok(ok) => ok,
                 Err(err) => {
                     log::warn!("failed to open {}: {err}", url);
+                    // Handle codecs required before the file can play
+                    let mut commands = Vec::new();
+                    while let Some(msg) = pipeline
+                        .bus()
+                        .unwrap()
+                        .pop_filtered(&[gst::MessageType::Element])
+                    {
+                        match msg.view() {
+                            gst::MessageView::Element(element) => {
+                                if gst_pbutils::MissingPluginMessage::is(&element) {
+                                    commands.push(Command::perform(
+                                        async { message::app(Message::MissingPlugin(msg)) },
+                                        |x| x,
+                                    ));
+                                    // Do one codec install at a time
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     pipeline.set_state(gst::State::Null).unwrap();
-                    return Command::none();
+                    return Command::batch(commands);
                 }
             }
         };
@@ -559,6 +607,30 @@ impl App {
         self.open_folder(path, position + 1, 1);
     }
 
+    fn add_file_to_project(&mut self, path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        let node = match ProjectNode::new(path) {
+            Ok(node) if matches!(node, ProjectNode::File { .. }) => node,
+            Err(e) => {
+                log::error!("failed to open project {} {}", path.display(), e);
+                return;
+            }
+            _ => {
+                log::error!(
+                    "failed to open project: expected {} to be a file path",
+                    path.display()
+                );
+                return;
+            }
+        };
+
+        let mut entity = self.nav_model.insert().text(node.name().to_owned());
+        if let Some(icon) = node.icon(16) {
+            entity = entity.icon(icon);
+        }
+        entity.data(node);
+    }
+
     fn save_config_state(&mut self) {
         if let Some(ref config_state_handler) = self.flags.config_state_handler {
             if let Err(err) = self.flags.config_state.write_entry(config_state_handler) {
@@ -574,9 +646,11 @@ impl App {
                 .as_ref()
                 .map_or(false, |video| video.has_video())
         {
+            self.core.window.show_headerbar = true && !self.fullscreen;
             self.controls = true;
             self.controls_time = Instant::now();
         } else if self.controls && self.controls_time.elapsed() > CONTROLS_TIMEOUT {
+            self.core.window.show_headerbar = false;
             self.controls = false;
         }
         self.update_mpris_state();
@@ -791,6 +865,7 @@ impl Application for App {
             position: 0.0,
             duration: 0.0,
             dragging: false,
+            paused_on_scrub: false,
             audio_codes: Vec::new(),
             audio_tags: Vec::new(),
             current_audio: -1,
@@ -809,7 +884,17 @@ impl Application for App {
             .icon(widget::icon::from_name("folder-open-symbolic").size(16))
             .text(fl!("open-folder"));
 
-        let command = app.load();
+        // TODO: This is kind of ugly and may be handled better in Arguments
+        let maybe_path = app
+            .flags
+            .url_opt
+            .as_ref()
+            .and_then(|url| url.to_file_path().ok());
+        let command = match (app.flags.urls.take(), maybe_path) {
+            (Some(urls), _) => command::message::app(Message::MultipleLoad(urls)),
+            (None, Some(path)) if path.is_dir() => command::message::app(Message::FolderLoad(path)),
+            _ => app.load(),
+        };
         (app, command)
     }
 
@@ -919,6 +1004,10 @@ impl Application for App {
                     self.dropdown_opt = Some(menu_kind);
                 }
             }
+            Message::DurationChanged(duration) => {
+                self.duration = duration.as_secs_f64();
+                self.update_mpris_meta();
+            }
             Message::FileClose => {
                 self.close();
             }
@@ -1018,6 +1107,30 @@ impl Application for App {
                     return self.update(Message::FolderLoad(path.clone()));
                 }
             }
+            Message::MultipleLoad(urls) => {
+                log::trace!("Loading multiple URLs: {urls:?}");
+                let paths: Vec<_> = urls
+                    .into_iter()
+                    .flat_map(|url| url.to_file_path())
+                    .collect();
+
+                for path in paths {
+                    if path.is_file() {
+                        log::trace!("Appending file to playlist: {}", path.display());
+                        self.add_file_to_project(path);
+                    } else if path.is_dir() {
+                        log::trace!("Appending directory to playlist: {}", path.display());
+                        self.open_project(path);
+                    } else {
+                        log::warn!(
+                            "Tried to add unsupported path to playlist: {}",
+                            path.display()
+                        );
+                    }
+                }
+
+                self.core.nav_bar_set_toggled(true);
+            }
             Message::Fullscreen => {
                 //TODO: cleanest way to close dropdowns
                 self.dropdown_opt = None;
@@ -1085,6 +1198,53 @@ impl Application for App {
                     self.update_controls(true);
                 }
             }
+            Message::Scrolled(delta) => {
+                let nav_bar_toggled = self.core.nav_bar_active();
+                if let Some(video) = &mut self.video_opt {
+                    let mut volume = video.volume();
+                    match delta {
+                        ScrollDelta::Pixels { x, y } => {
+                            if y < 0.0 {
+                                // scrolling down, lower volume
+                                volume -= 0.0125;
+                            } else if y > 0.0 {
+                                // scrolling up, increase volume
+                                volume += 0.0125;
+                            }
+
+                            if x > 0.0 {
+                                // scrolling left, lower volume
+                                volume -= 0.0125;
+                            } else if x < 0.0 {
+                                // scrolling right, increase volume
+                                volume += 0.0125;
+                            }
+                        }
+                        ScrollDelta::Lines { x, y } => {
+                            if y < 0.0 {
+                                // scrolling down, lower volume
+                                volume -= 0.0125;
+                            } else if y > 0.0 {
+                                // scrolling up, increase volume
+                                volume += 0.0125;
+                            }
+
+                            if x > 0.0 {
+                                // scrolling left, lower volume
+                                volume -= 0.0125;
+                            } else if x < 0.0 {
+                                // scrolling right, increase volume
+                                volume += 0.0125;
+                            }
+                        }
+                    }
+
+                    if (volume >= 0.0 && volume <= 1.0) && !nav_bar_toggled {
+                        video.set_volume(volume);
+                        self.update_controls(true);
+                    }
+                }
+            }
             Message::Seek(secs) => {
                 //TODO: cleanest way to close dropdowns
                 self.dropdown_opt = None;
@@ -1092,6 +1252,7 @@ impl Application for App {
                 if let Some(video) = &mut self.video_opt {
                     self.dragging = true;
                     self.position = secs;
+                    self.paused_on_scrub = video.paused();
                     video.set_paused(true);
                     let duration = Duration::try_from_secs_f64(self.position).unwrap_or_default();
                     video.seek(duration, true).expect("seek");
@@ -1114,7 +1275,7 @@ impl Application for App {
                     self.dragging = false;
                     let duration = Duration::try_from_secs_f64(self.position).unwrap_or_default();
                     video.seek(duration, true).expect("seek");
-                    video.set_paused(false);
+                    video.set_paused(self.paused_on_scrub);
                     self.update_controls(true);
                 }
             }
@@ -1268,6 +1429,7 @@ impl Application for App {
 
         let mut video_player: Element<_> = VideoPlayer::new(video)
             .mouse_hidden(!self.controls)
+            .on_duration_changed(Message::DurationChanged)
             .on_end_of_stream(Message::EndOfStream)
             .on_missing_plugin(Message::MissingPlugin)
             .on_new_frame(Message::NewFrame)
@@ -1552,6 +1714,7 @@ impl Application for App {
                     Some(Message::Key(modifiers, key))
                 }
                 Event::Mouse(MouseEvent::CursorMoved { .. }) => Some(Message::ShowControls),
+                Event::Mouse(MouseEvent::WheelScrolled { delta }) => Some(Message::Scrolled(delta)),
                 _ => None,
             }),
             cosmic_config::config_subscription(

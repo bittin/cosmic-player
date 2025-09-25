@@ -3,6 +3,9 @@ name = "cosmic-player"
 version = "0.1.0"
 edition = "2021"
 
+[build-dependencies]
+vergen = { version = "8", features = ["git", "gitcl"] }
+
 [dependencies]
 dirs = "5"
 gstreamer-tag = "0.23"
@@ -10,12 +13,17 @@ image = "0.24.9"
 lazy_static = "1"
 serde = { version = "1", features = ["serde_derive"] }
 tempfile = "3"
-tokio = "1"
-url = "2"
+tokio = { version = "1", features = ["sync"] }
+url = { version = "2", features = ["serde"] }
+# CLI arguments
+clap_lex = "0.7"
 # Internationalization
 icu_collator = "1.5"
 icu_provider = { version = "1.5", features = ["sync"] }
-i18n-embed = { version = "0.14", features = ["fluent-system", "desktop-requester"] }
+i18n-embed = { version = "0.14", features = [
+    "fluent-system",
+    "desktop-requester",
+] }
 i18n-embed-fl = "0.7"
 rust-embed = "8"
 # Logging
@@ -41,6 +49,9 @@ optional = true
 version = "0.2.1"
 features = ["serde"]
 
+[target.'cfg(unix)'.dependencies]
+fork = "0.2"
+
 [features]
 default = ["mpris-server", "xdg-portal", "wgpu"]
 xdg-portal = ["libcosmic/xdg-portal"]
@@ -57,4 +68,3 @@ debug = true
 # libcosmic = { path = "../libcosmic" }
 # cosmic-config = { path = "../libcosmic/cosmic-config" }
 # cosmic-theme = { path = "../libcosmic/cosmic-theme" }
-

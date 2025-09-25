@@ -1,8 +1,11 @@
+album = Álbum: {$album}
 audio = Áudio
 no-video-or-audio-file-open = Nenhum arquivo de vídeo ou áudio aberto
 open-file = Abrir arquivo
 open-folder = Abrir pasta
 subtitles = Legendas
+unknown-author = Autor desconhecido
+untitled = Sem título
 
 # Context Pages
 
@@ -12,9 +15,9 @@ settings = Configurações
 ### Appearance
 appearance = Aparência
 theme = Tema
-match-desktop = Acompanhar o tema do desktop
-dark = Escuro
-light = Claro
+match-desktop = Estilo do sistema
+dark = Estilo escuro
+light = Estilo claro
 
 # Menu
 
