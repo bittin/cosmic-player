@@ -1,21 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use cosmic::{
-    theme,
-    widget::menu::{self, key_bind::KeyBind, ItemHeight, ItemWidth, MenuBar},
-    Element,
+    Element, theme,
+    widget::menu::{self, ItemHeight, ItemWidth, MenuBar, key_bind::KeyBind},
 };
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{fl, Action, Config, ConfigState, Message};
+use crate::{Action, Config, ConfigState, Message, fl};
 
 pub fn menu_bar<'a>(
-    config: &Config,
+    _config: &Config,
     config_state: &ConfigState,
     key_binds: &HashMap<KeyBind, Action>,
-    projects: &Vec<(String, PathBuf)>,
+    projects: &[(String, PathBuf)],
 ) -> Element<'a, Message> {
-    let home_dir_opt = dirs::home_dir();
+    let home_dir_opt = std::env::home_dir();
     let format_path = |path: &PathBuf| -> String {
         if let Some(home_dir) = &home_dir_opt {
             if let Ok(part) = path.strip_prefix(home_dir) {
@@ -31,19 +30,43 @@ pub fn menu_bar<'a>(
         }
     };
 
-    let mut recent_files = Vec::with_capacity(config_state.recent_files.len());
+    let files_len = if config_state.recent_files.is_empty() {
+        0
+    } else {
+        config_state.recent_files.len() + 2
+    };
+    let mut recent_files = Vec::with_capacity(files_len);
     for (i, path) in config_state.recent_files.iter().enumerate() {
         recent_files.push(menu::Item::Button(
             format_url(path),
             Action::FileOpenRecent(i),
         ));
     }
+    if files_len > 0 {
+        recent_files.push(menu::Item::Divider);
+        recent_files.push(menu::Item::Button(
+            fl!("clear-recent"),
+            Action::FileClearRecents,
+        ));
+    }
 
-    let mut recent_projects = Vec::with_capacity(config_state.recent_projects.len());
+    let projects_len = if config_state.recent_projects.is_empty() {
+        0
+    } else {
+        config_state.recent_projects.len() + 2
+    };
+    let mut recent_projects = Vec::with_capacity(projects_len);
     for (i, path) in config_state.recent_projects.iter().enumerate() {
         recent_projects.push(menu::Item::Button(
             format_path(path),
             Action::FolderOpenRecent(i),
+        ));
+    }
+    if projects_len > 0 {
+        recent_projects.push(menu::Item::Divider);
+        recent_projects.push(menu::Item::Button(
+            fl!("clear-recent"),
+            Action::FolderClearRecents,
         ));
     }
 

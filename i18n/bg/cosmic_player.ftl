@@ -17,10 +17,10 @@ settings = Настройки
 ### Appearance
 
 appearance = Външен вид
-theme = Стил
-match-desktop = Системен
-dark = Тъмен
-light = Светъл
+theme = Тема
+match-desktop = Системна тема
+dark = Тъмна тема
+light = Светла тема
 
 # Menu
 
@@ -35,3 +35,5 @@ open-media-folder = Отваряне на папката за медия...
 open-recent-media-folder = Отваряне на последната папка с медии
 close-media-folder = Затваряне на папката за медия
 quit = Спиране на програмата
+off = Изкл.
+clear-recent = Изчистване на скорошните

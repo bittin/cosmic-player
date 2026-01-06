@@ -2,23 +2,25 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 use cosmic::{
-    app::{command, message, Command, Core, Settings},
+    Application, ApplicationExt, Element,
+    app::{Command, Core, Settings, command, message},
     cosmic_config::{self, CosmicConfigEntry},
     cosmic_theme, executor, font,
     iced::{
+        Alignment, Background, Border, Color, ContentFit, Length, Limits,
         event::{self, Event},
         keyboard::{Event as KeyEvent, Key, Modifiers},
         mouse::{Event as MouseEvent, ScrollDelta},
         subscription::Subscription,
-        window, Alignment, Background, Border, Color, ContentFit, Length, Limits,
+        window,
     },
     iced_style, theme,
-    widget::{self, menu::action::MenuAction, nav_bar, segmented_button, Slider},
-    Application, ApplicationExt, Element,
+    widget::{self, Slider, menu::action::MenuAction, nav_bar, segmented_button},
 };
 use iced_video_player::{
+    Video, VideoPlayer,
     gst::{self, prelude::*},
-    gst_app, gst_pbutils, Video, VideoPlayer,
+    gst_pbutils,
 };
 use std::{
     any::TypeId,
@@ -32,8 +34,8 @@ use std::{
 use tokio::sync::mpsc;
 
 use crate::{
-    config::{Config, ConfigState, CONFIG_VERSION},
-    key_bind::{key_binds, KeyBind},
+    config::{CONFIG_VERSION, Config, ConfigState},
+    key_bind::{KeyBind, key_binds},
     project::ProjectNode,
 };
 
@@ -46,6 +48,9 @@ mod menu;
 mod mpris;
 mod project;
 mod thumbnail;
+mod video;
+#[cfg(feature = "xdg-portal")]
+mod xdg_portals;
 
 static CONTROLS_TIMEOUT: Duration = Duration::new(2, 0);
 
@@ -103,20 +108,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     localize::localize();
 
-    let (config_handler, config) = match cosmic_config::Config::new(App::APP_ID, CONFIG_VERSION) {
+    let config = match cosmic_config::Config::new(App::APP_ID, CONFIG_VERSION) {
         Ok(config_handler) => {
-            let config = match Config::get_entry(&config_handler) {
+            match Config::get_entry(&config_handler) {
                 Ok(ok) => ok,
                 Err((errs, config)) => {
                     log::error!("errors loading config: {:?}", errs);
                     config
                 }
-            };
-            (Some(config_handler), config)
+            }
         }
         Err(err) => {
             log::error!("failed to create config handler: {}", err);
-            (None, Config::default())
+            Config::default()
         }
     };
 
@@ -141,8 +145,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     settings = settings.theme(config.app_theme.theme());
     settings = settings.size_limits(Limits::NONE.min_width(360.0).min_height(180.0));
 
+   
     let flags = Flags {
-        config_handler,
         config,
         config_state_handler,
         config_state,
@@ -158,9 +162,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 pub enum Action {
     FileClose,
     FileOpen,
+    FileClearRecents,
     FileOpenRecent(usize),
     FolderClose(usize),
     FolderOpen,
+    FolderClearRecents,
     FolderOpenRecent(usize),
     Fullscreen,
     PlayPause,
@@ -176,9 +182,11 @@ impl MenuAction for Action {
         match self {
             Self::FileClose => Message::FileClose,
             Self::FileOpen => Message::FileOpen,
+            Self::FileClearRecents => Message::FileClearRecents,
             Self::FileOpenRecent(index) => Message::FileOpenRecent(*index),
             Self::FolderClose(index) => Message::FolderClose(*index),
             Self::FolderOpen => Message::FolderOpen,
+            Self::FolderClearRecents => Message::FolderClearRecents,
             Self::FolderOpenRecent(index) => Message::FolderOpenRecent(*index),
             Self::Fullscreen => Message::Fullscreen,
             Self::PlayPause => Message::PlayPause,
@@ -191,7 +199,6 @@ impl MenuAction for Action {
 
 #[derive(Clone)]
 pub struct Flags {
-    config_handler: Option<cosmic_config::Config>,
     config: Config,
     config_state_handler: Option<cosmic_config::Config>,
     config_state: ConfigState,
@@ -233,6 +240,18 @@ pub enum MprisEvent {
     State(MprisState),
 }
 
+#[derive(Clone, Debug)]
+pub struct TextCode {
+    pub id: Option<i32>,
+    pub name: String,
+}
+
+impl AsRef<str> for TextCode {
+    fn as_ref(&self) -> &str {
+        self.name.as_str()
+    }
+}
+
 /// Messages that are used specifically by our [`App`].
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -244,10 +263,12 @@ pub enum Message {
     FileClose,
     FileLoad(url::Url),
     FileOpen,
+    FileClearRecents,
     FileOpenRecent(usize),
     FolderClose(usize),
     FolderLoad(PathBuf),
     FolderOpen,
+    FolderClearRecents,
     FolderOpenRecent(usize),
     MultipleLoad(Vec<url::Url>),
     Fullscreen,
@@ -295,8 +316,10 @@ pub struct App {
     audio_codes: Vec<String>,
     audio_tags: Vec<gst::TagList>,
     current_audio: i32,
-    text_codes: Vec<String>,
-    current_text: i32,
+    text_codes: Vec<TextCode>,
+    current_text: Option<i32>,
+    #[cfg(feature = "xdg-portal")]
+    inhibit: tokio::sync::watch::Sender<bool>,
 }
 
 impl App {
@@ -320,9 +343,10 @@ impl App {
         self.audio_tags.clear();
         self.current_audio = -1;
         self.text_codes.clear();
-        self.current_text = -1;
+        self.current_text = None;
         self.update_mpris_meta();
         self.update_nav_bar_active();
+        self.allow_idle();
         was_open
     }
 
@@ -345,71 +369,9 @@ impl App {
         self.flags.config_state.recent_files.truncate(10);
         self.save_config_state();
 
-        //TODO: this code came from iced_video_player::Video::new and has been modified to stop the pipeline on error
-        //TODO: remove unwraps and enable playback of files with only audio.
-        let video = {
-            gst::init().unwrap();
-
-            let pipeline = format!(
-                "playbin uri=\"{}\" video-sink=\"videoscale ! videoconvert ! videoflip method=automatic ! appsink name=iced_video drop=true caps=video/x-raw,format=NV12,pixel-aspect-ratio=1/1\"",
-                url.as_str()
-            );
-            let pipeline = gst::parse::launch(pipeline.as_ref())
-                .unwrap()
-                .downcast::<gst::Pipeline>()
-                .map_err(|_| iced_video_player::Error::Cast)
-                .unwrap();
-            pipeline.connect("element-setup", false, |vals| {
-                let Ok(elem) = vals[1].get::<gst::Element>() else {
-                    return None;
-                };
-                if let Some(factory) = elem.factory() {
-                    if factory.name() == "souphttpsrc" {
-                        elem.set_property("user-agent", "Mozilla/5.0 (X11; Linux x86_64; rv:142.0) Gecko/20100101 Firefox/142.0");
-                    }
-                }
-                None
-            });
-            let video_sink: gst::Element = pipeline.property("video-sink");
-            let pad = video_sink.pads().first().cloned().unwrap();
-            let pad = pad.dynamic_cast::<gst::GhostPad>().unwrap();
-            let bin = pad
-                .parent_element()
-                .unwrap()
-                .downcast::<gst::Bin>()
-                .unwrap();
-            let video_sink = bin.by_name("iced_video").unwrap();
-            let video_sink = video_sink.downcast::<gst_app::AppSink>().unwrap();
-
-            match Video::from_gst_pipeline(pipeline.clone(), video_sink, None) {
-                Ok(ok) => ok,
-                Err(err) => {
-                    log::warn!("failed to open {}: {err}", url);
-                    // Handle codecs required before the file can play
-                    let mut commands = Vec::new();
-                    while let Some(msg) = pipeline
-                        .bus()
-                        .unwrap()
-                        .pop_filtered(&[gst::MessageType::Element])
-                    {
-                        match msg.view() {
-                            gst::MessageView::Element(element) => {
-                                if gst_pbutils::MissingPluginMessage::is(&element) {
-                                    commands.push(Command::perform(
-                                        async { message::app(Message::MissingPlugin(msg)) },
-                                        |x| x,
-                                    ));
-                                    // Do one codec install at a time
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    pipeline.set_state(gst::State::Null).unwrap();
-                    return Command::batch(commands);
-                }
-            }
+        let video = match video::new_video(&url) {
+            Ok(ok) => ok,
+            Err(err) => return err,
         };
 
         self.duration = video.duration().as_secs_f64();
@@ -441,46 +403,33 @@ impl App {
         self.current_audio = pipeline.property::<i32>("current-audio");
 
         let n_text = pipeline.property::<i32>("n-text");
-        self.text_codes = Vec::with_capacity(n_text as usize);
+        self.text_codes = Vec::with_capacity(n_text as usize + 1);
+        self.text_codes.push(TextCode {
+            id: None,
+            name: fl!("off"),
+        });
         for i in 0..n_text {
             let tags: gst::TagList = pipeline.emit_by_name("get-text-tags", &[&i]);
             log::info!("text stream {i}: {tags:#?}");
-            self.text_codes
-                .push(if let Some(title) = tags.get::<gst::tags::Title>() {
-                    title.get().to_string()
-                } else if let Some(language_code) = tags.get::<gst::tags::LanguageCode>() {
-                    let language_code = language_code.get();
-                    language_name(language_code).unwrap_or_else(|| language_code.to_string())
-                } else {
-                    format!("Subtitle #{i}")
-                });
+            let name = if let Some(title) = tags.get::<gst::tags::Title>() {
+                title.get().to_string()
+            } else if let Some(language_code) = tags.get::<gst::tags::LanguageCode>() {
+                let language_code = language_code.get();
+                language_name(language_code).unwrap_or_else(|| language_code.to_string())
+            } else {
+                format!("Subtitle #{i}")
+            };
+            self.text_codes.push(TextCode { id: Some(i), name });
         }
-        self.current_text = pipeline.property::<i32>("current-text");
-
-        //TODO: Flags can be used to enable/disable subtitles
-        let flags_value = pipeline.property_value("flags");
-        println!("original flags {:?}", flags_value);
-        match flags_value.transform::<i32>() {
-            Ok(flags_transform) => match flags_transform.get::<i32>() {
-                Ok(mut flags) => {
-                    flags |= GST_PLAY_FLAG_VIDEO | GST_PLAY_FLAG_AUDIO | GST_PLAY_FLAG_TEXT;
-                    match gst::glib::Value::from(flags).transform_with_type(flags_value.type_()) {
-                        Ok(value) => pipeline.set_property("flags", value),
-                        Err(err) => {
-                            log::warn!("failed to transform int to flags: {err}");
-                        }
-                    }
-                }
-                Err(err) => {
-                    log::warn!("failed to get flags as int: {err}");
-                }
-            },
-            Err(err) => {
-                log::warn!("failed to transform flags to int: {err}");
-            }
+        let current_text = pipeline.property::<i32>("current-text");
+        if current_text >= 0 {
+            self.current_text = Some(current_text);
+        } else {
+            self.current_text = None;
         }
-        println!("updated flags {:?}", pipeline.property_value("flags"));
 
+        self.inhibit_idle();
+        self.update_flags();
         self.update_mpris_meta();
         self.update_title()
     }
@@ -660,6 +609,38 @@ impl App {
         cosmic::app::command::set_theme(self.flags.config.app_theme.theme())
     }
 
+    fn update_flags(&mut self) {
+        let Some(video) = &mut self.video_opt else {
+            return;
+        };
+        let pipeline = video.pipeline();
+        let flags_value = pipeline.property_value("flags");
+        match flags_value.transform::<i32>() {
+            Ok(flags_transform) => match flags_transform.get::<i32>() {
+                Ok(mut flags) => {
+                    flags |= GST_PLAY_FLAG_VIDEO | GST_PLAY_FLAG_AUDIO;
+                    if self.current_text.is_some() {
+                        flags |= GST_PLAY_FLAG_TEXT;
+                    } else {
+                        flags &= !GST_PLAY_FLAG_TEXT;
+                    }
+                    match gst::glib::Value::from(flags).transform_with_type(flags_value.type_()) {
+                        Ok(value) => pipeline.set_property("flags", value),
+                        Err(err) => {
+                            log::warn!("failed to transform int to flags: {err}");
+                        }
+                    }
+                }
+                Err(err) => {
+                    log::warn!("failed to get flags as int: {err}");
+                }
+            },
+            Err(err) => {
+                log::warn!("failed to transform flags to int: {err}");
+            }
+        }
+    }
+
     fn update_mpris_meta(&mut self) {
         let mut new = MprisMeta {
             //TODO: clear url_opt when file is closed
@@ -820,6 +801,20 @@ impl App {
         let title = "COSMIC Media Player";
         self.set_window_title(title.to_string())
     }
+
+    /// Allow screen to dim or turn off if there is no input from the user.
+    ///
+    /// Basically, undo [`Self::inhibit_idle`].
+    fn allow_idle(&self) {
+        #[cfg(feature = "xdg-portal")]
+        let _ = self.inhibit.send(false);
+    }
+
+    /// Prevent screen from dimming or turning off if there is no keyboard/mouse input.
+    fn inhibit_idle(&self) {
+        #[cfg(feature = "xdg-portal")]
+        let _ = self.inhibit.send(true);
+    }
 }
 
 /// Implement [`cosmic::Application`] to integrate with COSMIC.
@@ -848,6 +843,13 @@ impl Application for App {
     fn init(mut core: Core, flags: Self::Flags) -> (Self, Command<Self::Message>) {
         core.window.content_container = false;
 
+        #[cfg(feature = "xdg-portal")]
+        let inhibit = {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            std::mem::drop(tokio::spawn(crate::xdg_portals::inhibit(rx)));
+            tx
+        };
+
         let mut app = App {
             core,
             flags,
@@ -870,7 +872,9 @@ impl Application for App {
             audio_tags: Vec::new(),
             current_audio: -1,
             text_codes: Vec::new(),
-            current_text: -1,
+            current_text: None,
+            #[cfg(feature = "xdg-portal")]
+            inhibit,
         };
 
         // Do not show nav bar by default. Will be opened by open_project if needed
@@ -1035,6 +1039,10 @@ impl Application for App {
                     |x| x,
                 );
             }
+            Message::FileClearRecents => {
+                self.flags.config_state.recent_files.clear();
+                self.save_config_state();
+            }
             Message::FileOpenRecent(index) => {
                 if let Some(url) = self.flags.config_state.recent_files.get(index) {
                     return self.update(Message::FileLoad(url.clone()));
@@ -1107,6 +1115,10 @@ impl Application for App {
                     return self.update(Message::FolderLoad(path.clone()));
                 }
             }
+            Message::FolderClearRecents => {
+                self.flags.config_state.recent_projects.clear();
+                self.save_config_state();
+            }
             Message::MultipleLoad(urls) => {
                 log::trace!("Loading multiple URLs: {urls:?}");
                 let paths: Vec<_> = urls
@@ -1137,6 +1149,7 @@ impl Application for App {
 
                 self.fullscreen = !self.fullscreen;
                 self.core.window.show_headerbar = !self.fullscreen;
+                self.controls = !self.fullscreen;
                 return window::change_mode(
                     window::Id::MAIN,
                     if self.fullscreen {
@@ -1176,13 +1189,18 @@ impl Application for App {
                     }
                 }
             }
-            Message::TextCode(code) => {
-                if let Ok(code) = i32::try_from(code) {
-                    if let Some(video) = &self.video_opt {
-                        let pipeline = video.pipeline();
-                        pipeline.set_property("current-text", code);
-                        self.current_text = pipeline.property("current-text");
+            Message::TextCode(index) => {
+                if let Some(text_code) = self.text_codes.get(index) {
+                    if let Some(id) = text_code.id {
+                        if let Some(video) = &self.video_opt {
+                            let pipeline = video.pipeline();
+                            pipeline.set_property("current-text", id);
+                            self.current_text = Some(pipeline.property("current-text"));
+                        }
+                    } else {
+                        self.current_text = None;
                     }
+                    self.update_flags();
                 }
             }
             Message::Pause | Message::Play | Message::PlayPause => {
@@ -1190,12 +1208,18 @@ impl Application for App {
                 self.dropdown_opt = None;
 
                 if let Some(video) = &mut self.video_opt {
-                    video.set_paused(match message {
+                    let pause = match message {
                         Message::Play => false,
                         Message::Pause => true,
                         _ => !video.paused(),
-                    });
+                    };
+                    video.set_paused(pause);
                     self.update_controls(true);
+                    if pause {
+                        self.allow_idle();
+                    } else {
+                        self.inhibit_idle();
+                    }
                 }
             }
             Message::Scrolled(delta) => {
@@ -1371,7 +1395,7 @@ impl Application for App {
         Command::none()
     }
 
-    fn header_start(&self) -> Vec<Element<Self::Message>> {
+    fn header_start(&self) -> Vec<Element<'_, Self::Message>> {
         vec![menu::menu_bar(
             &self.flags.config,
             &self.flags.config_state,
@@ -1381,7 +1405,7 @@ impl Application for App {
     }
 
     /// Creates a view after each update.
-    fn view(&self) -> Element<Self::Message> {
+    fn view(&self) -> Element<'_, Self::Message> {
         let theme = theme::active();
         let cosmic_theme::Spacing {
             space_xxs,
@@ -1548,12 +1572,13 @@ impl Application for App {
                         );
                     }
                     if !self.text_codes.is_empty() {
-                        //TODO: allow toggling subtitles
                         items.push(widget::text::heading(fl!("subtitles")).into());
                         items.push(
                             widget::dropdown(
                                 &self.text_codes,
-                                usize::try_from(self.current_text).ok(),
+                                self.text_codes
+                                    .iter()
+                                    .position(|x| x.id == self.current_text),
                                 Message::TextCode,
                             )
                             .into(),
