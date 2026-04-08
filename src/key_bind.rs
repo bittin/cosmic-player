@@ -24,9 +24,12 @@ pub fn key_binds() -> HashMap<KeyBind, Action> {
     //TODO: key bindings
     bind!([], Key::Character("f".into()), Fullscreen);
     bind!([Alt], Key::Named(Named::Enter), Fullscreen);
-    bind!([], Key::Named(Named::Space), PlayPause);
+    bind!([], Key::Character(" ".into()), PlayPause);
     bind!([], Key::Named(Named::ArrowLeft), SeekBackward);
     bind!([], Key::Named(Named::ArrowRight), SeekForward);
+    bind!([], Key::Character(".".into()), NextFrame);
+    bind!([], Key::Character(",".into()), PreviousFrame);
+    bind!([], Key::Character("a".into()), AbRepeat);
 
     key_binds
 }
