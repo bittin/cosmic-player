@@ -25,7 +25,7 @@ open-media = Открыть медиафайл…
 open-recent-media = Открыть недавний медиафайл
 close-file = Закрыть файл
 open-media-folder = Открыть папку медиафайлов...
-open-recent-media-folder = Недавние папки медиафайлов
+open-recent-media-folder = Открыть папку недавних медиафайлов
 close-media-folder = Закрыть папку медиафайлов
 quit = Выйти
 off = Выкл.
@@ -39,3 +39,9 @@ ab-repeat = Повтор A–B
 ab-repeat-set-a = Повтор A–B (уст. A)
 ab-repeat-set-b = Повтор A–B (уст. B)
 ab-repeat-clear = Повтор A–B (очистить)
+
+# XDG Metadata
+
+xdg-name = Медиаплеер
+xdg-keywords = Аудио;Фильм;Музыка;Видео;Медиа;Звук;Мультимедиа;Медиаплеер;
+xdg-comment = Медиаплеер для рабочей среды COSMIC

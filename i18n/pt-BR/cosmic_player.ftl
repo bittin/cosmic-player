@@ -41,8 +41,14 @@ repeat-track = Repetir faixa
 repeat-disabled = Repetição desabilitada
 next-frame = Próximo quadro
 previous-frame = Quadro anterior
-playback = Reproduzir
+playback = Reprodução
 ab-repeat = Repetir A-B
 ab-repeat-set-a = Repetir A-B (A)
 ab-repeat-set-b = Repetir A-B (B)
 ab-repeat-clear = Limpar repetição A-B
+
+# XDG Metadata
+
+xdg-name = Reprodutor de mídia
+xdg-comment = Reprodutor de mídia do ambiente COSMIC
+xdg-keywords = Áudio;Filme;Música;Som;Vídeo;Media;Player;
